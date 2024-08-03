@@ -1,84 +1,74 @@
+import os
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from socketserver import ThreadingMixIn
 import socket
 import threading
-import datetime
-import http.server
-import socketserver
 import json
-from urllib.parse import parse_qs
+import datetime
 from pymongo import MongoClient
-
-# Налаштування для MongoDB
-mongo_client = MongoClient(
-    'mongodb+srv://goit-test:rVoIjkuy~8DPWi!mV7@testcluster.dwyiq17.mongodb.net/?retryWrites=true&w=majority&ssl=true'
-    '&appName=TestCluster')
-db = mongo_client['app_db']
-collection = db['messages']
-
-# Налаштування для HTTP-сервера
-PORT = 3000
-Handler = http.server.SimpleHTTPRequestHandler
+from urllib.parse import parse_qs
 
 
-class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+# HTTP Server
+class RequestHandler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.path = '/templates/index.html'
+        elif self.path == '/message.html':
+            self.path = '/templates/message.html'
+        elif self.path.startswith('/static'):
+            self.path = self.path
+        else:
+            self.path = '/templates/error.html'
+            self.send_error(404)
+        return SimpleHTTPRequestHandler.do_GET(self)
+
     def do_POST(self):
         if self.path == '/message':
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
-            parsed_data = parse_qs(post_data.decode('utf-8'))
-
-            message_data = {
-                "date": datetime.datetime.now().isoformat(),
-                "username": parsed_data['username'][0],
-                "message": parsed_data['message'][0]
-            }
-
-            # Відправлення даних на Socket-сервер
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(('localhost', 5000))
-                s.sendall(json.dumps(message_data).encode('utf-8'))
-
-            self.send_response(303)
+            post_params = parse_qs(post_data.decode('utf-8'))
+            username = post_params['username'][0]
+            message = post_params['message'][0]
+            send_message_to_socket_server(username, message)
+            self.send_response(302)
             self.send_header('Location', '/')
             self.end_headers()
-        else:
-            self.send_error(404, 'File Not Found')
-
-    def do_GET(self):
-        if self.path == '/':
-            self.path = 'index.html'
-        elif self.path == '/message.html':
-            self.path = 'message.html'
-        elif self.path == '/style.css':
-            self.path = 'style.css'
-        elif self.path == '/logo.png':
-            self.path = 'logo.png'
-        else:
-            self.path = 'error.html'
-        return http.server.SimpleHTTPRequestHandler.do_GET(self)
 
 
 def run_http_server():
-    with socketserver.TCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
-        print(f"Serving on port {PORT}")
-        httpd.serve_forever()
+    server_address = ('', 3000)
+    httpd = HTTPServer(server_address, RequestHandler)
+    httpd.serve_forever()
 
 
-# Налаштування для Socket-сервера
-def run_socket_server():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind(('localhost', 5000))
-        server_socket.listen()
-        print("Socket server running on port 5000")
-        while True:
-            conn, addr = server_socket.accept()
-            with conn:
-                data = conn.recv(1024)
-                if data:
-                    message_data = json.loads(data.decode('utf-8'))
-                    collection.insert_one(message_data)
-                    print(f"Received and stored: {message_data}")
+# Socket Server
+def socket_server():
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind(('0.0.0.0', 5000))
+    server_socket.listen(5)
+
+    client = MongoClient('mongodb://mongodb:27017/')
+    db = client.mydatabase
+    collection = db.messages
+
+    while True:
+        client_socket, addr = server_socket.accept()
+        data = client_socket.recv(1024)
+        message_data = json.loads(data.decode('utf-8'))
+        message_data['date'] = str(datetime.datetime.now())
+        collection.insert_one(message_data)
+        client_socket.close()
 
 
-if __name__ == "__main__":
+def send_message_to_socket_server(username, message):
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect(('socket-server', 5000))
+    message_data = json.dumps({'username': username, 'message': message})
+    client_socket.send(message_data.encode('utf-8'))
+    client_socket.close()
+
+
+if __name__ == '__main__':
     threading.Thread(target=run_http_server).start()
-    threading.Thread(target=run_socket_server).start()
+    threading.Thread(target=socket_server).start()
